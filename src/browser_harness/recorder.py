@@ -287,7 +287,11 @@ def _capture(d, helper, args=(), kwargs=None, duration=None):
         event["frame"] = frame
     except Exception:
         pass
-    with (d / "events.jsonl").open("a", encoding="utf-8") as f:
+    # Page-controlled strings (document.title etc.) can carry lone surrogates
+    # in through CDP's \uDXXX escapes; they can't encode as UTF-8, and one
+    # would kill the whole trace. Replace with U+FFFD — same medicine run.py
+    # already gives stdout (#124).
+    with (d / "events.jsonl").open("a", encoding="utf-8", errors="replace") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
