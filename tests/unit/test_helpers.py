@@ -165,7 +165,7 @@ def _fill_input_cdp_calls(monkeypatch, user_agent, texts=("x",)):
 
     def fake_cdp(method, **kwargs):
         calls.append((method, kwargs))
-        return {"userAgent": user_agent} if method == "Browser.getVersion" else {}
+        return {"userAgent": user_agent} if method == "Browser.getVersion" and user_agent is not None else {}
 
     with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
          patch("browser_harness.helpers.js", return_value=True):  # element found
@@ -204,6 +204,13 @@ def test_fill_input_clear_first_uses_ctrl_for_linux_browser(monkeypatch):
     assert a_events, "expected an 'a' key event for select-all"
     assert all(e.get("modifiers") == 2 for e in a_events), \
         f"select-all 'a' must carry modifiers=2 for a Linux browser; got {[e.get('modifiers') for e in a_events]}"
+
+
+def test_fill_input_clear_first_defaults_to_ctrl_without_a_user_agent(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, None)
+    a_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent" and kw.get("key") == "a"]
+    assert a_events
+    assert all(e.get("modifiers") == 2 for e in a_events)
 
 
 def test_fill_input_queries_browser_os_once(monkeypatch):
