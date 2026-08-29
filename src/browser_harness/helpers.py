@@ -265,7 +265,7 @@ def _printable_key(char):
     """
     unshifted = _SHIFTED_CHARS.get(char, char)
     needs_shift = char in _SHIFTED_CHARS or char.isupper()
-    if "a" <= unshifted.lower() <= "z":
+    if unshifted.isascii() and "a" <= unshifted.lower() <= "z":
         return f"Key{unshifted.upper()}", ord(unshifted.upper()), needs_shift
     if unshifted.isdigit() and unshifted.isascii():
         return f"Digit{unshifted}", ord(unshifted), needs_shift
