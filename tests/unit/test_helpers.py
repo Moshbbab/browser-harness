@@ -185,6 +185,8 @@ def test_fill_input_clear_first_sends_select_all_then_backspace(monkeypatch):
     assert a_events, "expected an 'a' key event for select-all"
     assert all(e.get("modifiers") == 4 for e in a_events), \
         f"select-all 'a' must carry modifiers=4 for a macOS browser; got {[e.get('modifiers') for e in a_events]}"
+    assert a_events[0].get("commands") == ["SelectAll"]
+    assert "commands" not in a_events[-1]
 
     # Crucial: no `char` event for the "a" — emitting one makes Chrome treat
     # Cmd/Ctrl+A as a printable letter instead of a shortcut.

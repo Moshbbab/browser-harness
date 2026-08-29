@@ -225,9 +225,11 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
         # select-all shortcut, leaving the field uncleared.
         mods = _select_all_modifier()
         select_all = {"key": "a", "code": "KeyA", "modifiers": mods,
-                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65}
+                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65,
+                      "commands": ["SelectAll"]}
         cdp("Input.dispatchKeyEvent", type="rawKeyDown", **select_all)
-        cdp("Input.dispatchKeyEvent", type="keyUp", **select_all)
+        cdp("Input.dispatchKeyEvent", type="keyUp",
+            **{k: v for k, v in select_all.items() if k != "commands"})
         press_key("Backspace")
     for ch in text:
         press_key(ch)
