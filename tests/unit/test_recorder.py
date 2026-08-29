@@ -52,13 +52,45 @@ def test_capture_uses_the_screenshot_ipc_timeout(tmp_path, monkeypatch):
 
 
 def test_dropped_frame_is_recorded_and_never_raises(tmp_path, monkeypatch):
-    """A failed screenshot stays non-fatal, but stops being invisible."""
-    monkeypatch.setattr(helpers, "cdp", _FakeCDP(error=TimeoutError("timed out")))
+    """A failed screenshot stays non-fatal, but stops being invisible.
+
+    Drives the real IPC timeout rather than a hand-made TimeoutError: _send()
+    is what actually raises when a cloud screenshot overruns, and a stand-in
+    with a message of its own would hide an empty one on the real exception.
+    """
+
+    class _Socket:
+        def settimeout(self, _value):
+            pass
+
+        def close(self):
+            pass
+
+    def _timeout(_conn, _token, _req):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(helpers.ipc, "connect", lambda _name, timeout=None: (_Socket(), None))
+    monkeypatch.setattr(helpers.ipc, "request", _timeout)
     monkeypatch.setattr(helpers, "js", lambda expression: {})
 
     recorder._capture(tmp_path, "click_at_xy", (10, 20), {})
 
     event = _events(tmp_path)[0]
     assert "frame" not in event
-    assert event["frame_error"].startswith("TimeoutError")
     assert not list(tmp_path.glob("*.jpg"))
+
+    detail = event["frame_error"]
+    assert detail.startswith("_IPCResponseTimeout: ")
+    # The whole point of the key: it has to say what timed out, and for how long.
+    assert "Page.captureScreenshot" in detail
+    assert f"{helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS:g}s" in detail
+
+
+def test_frame_error_stays_useful_for_a_message_less_exception(tmp_path, monkeypatch):
+    """Any bare `raise SomeError` must not record a dangling 'SomeError: '."""
+    monkeypatch.setattr(helpers, "cdp", _FakeCDP(error=RuntimeError()))
+    monkeypatch.setattr(helpers, "js", lambda expression: {})
+
+    recorder._capture(tmp_path, "click_at_xy", (10, 20), {})
+
+    assert _events(tmp_path)[0]["frame_error"] == "RuntimeError: no detail"

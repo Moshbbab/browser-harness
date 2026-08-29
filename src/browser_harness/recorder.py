@@ -299,7 +299,9 @@ def _capture(d, helper, args=(), kwargs=None, duration=None):
         # A dropped frame must not break the run, but it must not vanish
         # either — without this the only symptom is a recording that ends up
         # with fewer frames than actions, and no way to tell why.
-        event["frame_error"] = f"{type(e).__name__}: {e}"[:200]
+        # `str(e) or ...` because an exception raised bare (no args) stringifies
+        # to "", which would record a useless "SomeError: " and defeat the point.
+        event["frame_error"] = f"{type(e).__name__}: {str(e) or 'no detail'}"[:200]
     with (d / "events.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
