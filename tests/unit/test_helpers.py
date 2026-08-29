@@ -154,31 +154,37 @@ def test_fill_input_raises_when_element_not_found():
             helpers.fill_input("#missing", "hello")
 
 
-def test_fill_input_clear_first_sends_select_all_then_backspace():
-    import sys
+_MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+_LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-    key_events = []
+
+def _fill_input_cdp_calls(monkeypatch, user_agent, texts=("x",)):
+    """fill_input(clear_first=True) each text against a browser with this user_agent; returns cdp calls."""
+    monkeypatch.setattr(helpers, "_SELECT_ALL_MODIFIER", None)
+    calls = []
 
     def fake_cdp(method, **kwargs):
-        if method == "Input.dispatchKeyEvent":
-            key_events.append(kwargs)
-        return {}
-
-    def fake_js(expr, **kwargs):
-        return True  # element found
+        calls.append((method, kwargs))
+        return {"userAgent": user_agent} if method == "Browser.getVersion" else {}
 
     with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
-         patch("browser_harness.helpers.js", side_effect=fake_js):
-        helpers.fill_input("#inp", "x", clear_first=True)
+         patch("browser_harness.helpers.js", return_value=True):  # element found
+        for text in texts:
+            helpers.fill_input("#inp", text, clear_first=True)
+    return calls
 
-    # The "a" must be dispatched with the platform-correct modifier (Meta=4 on
-    # macOS, Ctrl=2 elsewhere). Without the modifier, the field would never get
-    # selected — it would just receive a literal "a".
-    expected_mod = 4 if sys.platform == "darwin" else 2
+
+def test_fill_input_clear_first_sends_select_all_then_backspace(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _MAC_UA)
+    key_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent"]
+
+    # The "a" must carry the modifier of the browser's OS (Meta=4 on macOS,
+    # Ctrl=2 elsewhere), not this process's. Without the modifier, the field
+    # would never get selected — it would just receive a literal "a".
     a_events = [e for e in key_events if e.get("key") == "a"]
     assert a_events, "expected an 'a' key event for select-all"
-    assert all(e.get("modifiers") == expected_mod for e in a_events), \
-        f"select-all 'a' must carry modifiers={expected_mod}; got {[e.get('modifiers') for e in a_events]}"
+    assert all(e.get("modifiers") == 4 for e in a_events), \
+        f"select-all 'a' must carry modifiers=4 for a macOS browser; got {[e.get('modifiers') for e in a_events]}"
 
     # Crucial: no `char` event for the "a" — emitting one makes Chrome treat
     # Cmd/Ctrl+A as a printable letter instead of a shortcut.
@@ -188,6 +194,19 @@ def test_fill_input_clear_first_sends_select_all_then_backspace():
     # Backspace still fires (via press_key, which uses keyDown).
     keys_down = [e.get("key") for e in key_events if e.get("type") in ("keyDown", "rawKeyDown")]
     assert "Backspace" in keys_down
+
+
+def test_fill_input_clear_first_uses_ctrl_for_linux_browser(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _LINUX_UA)
+    a_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent" and kw.get("key") == "a"]
+    assert a_events, "expected an 'a' key event for select-all"
+    assert all(e.get("modifiers") == 2 for e in a_events), \
+        f"select-all 'a' must carry modifiers=2 for a Linux browser; got {[e.get('modifiers') for e in a_events]}"
+
+
+def test_fill_input_queries_browser_os_once(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _LINUX_UA, texts=("x", "y"))
+    assert [m for m, _ in calls].count("Browser.getVersion") == 1
 
 
 def test_fill_input_no_clear_skips_ctrl_a():
