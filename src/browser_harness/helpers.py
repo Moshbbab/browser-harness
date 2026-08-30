@@ -56,7 +56,13 @@ def _send(req, response_timeout=DEFAULT_IPC_RESPONSE_TIMEOUT_SECONDS):
         try:
             r = ipc.request(c, token, req)
         except TimeoutError as e:
-            raise _IPCResponseTimeout from e
+            # Carry the detail on the exception itself. Raising the bare class
+            # left str(exc) empty, so every caller that reported the error had
+            # to rebuild the context by hand or print nothing useful.
+            label = req.get("method") or req.get("meta") or "request"
+            raise _IPCResponseTimeout(
+                f"{label} timed out after {response_timeout:g}s waiting for the daemon"
+            ) from e
     finally:
         c.close()
     if "error" in r: raise RuntimeError(r["error"])
