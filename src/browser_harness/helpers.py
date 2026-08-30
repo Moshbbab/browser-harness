@@ -3,7 +3,7 @@
 Core helpers live here. Agent-editable helpers live in
 BH_AGENT_WORKSPACE/agent_helpers.py.
 """
-import base64, importlib.util, json, math, os, sys, time, urllib.request
+import base64, importlib.util, json, math, os, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -196,6 +196,15 @@ def click_at_xy(x, y, button="left", clicks=1):
 def type_text(text):
     cdp("Input.insertText", text=text)
 
+_SELECT_ALL_MODIFIER = None
+def _select_all_modifier():
+    """Select-all modifier by the browser's OS (not this process's): 4=Meta on macOS, else 2=Ctrl."""
+    global _SELECT_ALL_MODIFIER
+    if _SELECT_ALL_MODIFIER is None:
+        ua = cdp("Browser.getVersion").get("userAgent", "")
+        _SELECT_ALL_MODIFIER = 4 if "Mac OS X" in ua or "Macintosh" in ua else 2
+    return _SELECT_ALL_MODIFIER
+
 def fill_input(selector, text, clear_first=True, timeout=0.0):
     """Fill a framework-managed input (React controlled, Vue v-model, Ember tracked).
 
@@ -220,11 +229,13 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
         # `char` event for single-char keys. With Ctrl/Cmd held, that `char`
         # makes Chrome treat the input as a printable "a" instead of firing the
         # select-all shortcut, leaving the field uncleared.
-        mods = 4 if sys.platform == "darwin" else 2  # Cmd on macOS, Ctrl elsewhere
+        mods = _select_all_modifier()
         select_all = {"key": "a", "code": "KeyA", "modifiers": mods,
-                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65}
+                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65,
+                      "commands": ["SelectAll"]}
         cdp("Input.dispatchKeyEvent", type="rawKeyDown", **select_all)
-        cdp("Input.dispatchKeyEvent", type="keyUp", **select_all)
+        cdp("Input.dispatchKeyEvent", type="keyUp",
+            **{k: v for k, v in select_all.items() if k != "commands"})
         press_key("Backspace")
     for ch in text:
         press_key(ch)
