@@ -290,5 +290,10 @@ def browser_stop_recording():
     return {"recording_dir": stop_recording()}
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run the Browser Harness MCP server over stdio."""
     SERVER.run()
+
+
+if __name__ == "__main__":
+    main()
