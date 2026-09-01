@@ -609,7 +609,7 @@ def test_fill_input_types_each_character_as_a_real_key():
     assert typed == [("H", "KeyH", 72, True), ("i", "KeyI", 73, False), ("!", "Digit1", 49, True)]
 
 
-def _js_session_calls(expression, target_id, evaluate=None):
+def _js_session_calls(expression, target_id, evaluate=None, detach=None):
     calls = []
 
     def fake_cdp(method, **kwargs):
@@ -620,6 +620,8 @@ def _js_session_calls(expression, target_id, evaluate=None):
             if evaluate:
                 return evaluate(kwargs)
             return {"result": {"type": "number", "value": 1}}
+        if method == "Target.detachFromTarget" and detach:
+            return detach(kwargs)
         return {}
 
     with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
@@ -664,3 +666,46 @@ def test_js_with_target_reuses_one_session_across_the_return_retry():
     calls = _js_session_calls("return 1", "iframe-target", evaluate=evaluate)
     assert seen == ["sess-1", "sess-1"]
     assert [m for m, _ in calls].count("Target.detachFromTarget") == 1
+
+
+def test_js_ignores_detach_of_a_session_chrome_already_dropped():
+    def gone(_kwargs):
+        raise RuntimeError("CDP error: No session with given id")
+
+    calls = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append(method)
+        if method == "Target.attachToTarget":
+            return {"sessionId": "sess-1"}
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "number", "value": 7}}
+        return gone(kwargs)
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+        assert helpers.js("7", target_id="iframe-target") == 7
+    assert calls[-1] == "Target.detachFromTarget"
+
+
+def test_js_surfaces_an_unexpected_detach_failure_after_success():
+    def fake_cdp(method, **kwargs):
+        if method == "Target.attachToTarget":
+            return {"sessionId": "sess-1"}
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "number", "value": 7}}
+        raise RuntimeError("daemon unreachable")
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="daemon unreachable"):
+        helpers.js("7", target_id="iframe-target")
+
+
+def test_js_keeps_the_evaluation_error_when_detach_also_fails():
+    def fake_cdp(method, **kwargs):
+        if method == "Target.attachToTarget":
+            return {"sessionId": "sess-1"}
+        if method == "Runtime.evaluate":
+            raise RuntimeError("evaluation failed")
+        raise RuntimeError("daemon unreachable")
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="evaluation failed"):
+        helpers.js("7", target_id="iframe-target")
