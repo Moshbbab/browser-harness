@@ -607,3 +607,60 @@ def test_fill_input_types_each_character_as_a_real_key():
     typed = [(e["key"], e["code"], e["windowsVirtualKeyCode"], bool(e["modifiers"] & 8))
              for e in events if e["type"] == "keyDown"]
     assert typed == [("H", "KeyH", 72, True), ("i", "KeyI", 73, False), ("!", "Digit1", 49, True)]
+
+
+def _js_session_calls(expression, target_id, evaluate=None):
+    calls = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.attachToTarget":
+            return {"sessionId": f"sess-{len(calls)}"}
+        if method == "Runtime.evaluate":
+            if evaluate:
+                return evaluate(kwargs)
+            return {"result": {"type": "number", "value": 1}}
+        return {}
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+        try:
+            helpers.js(expression, target_id=target_id)
+        except RuntimeError:
+            pass
+    return calls
+
+
+def test_js_with_target_detaches_the_session_it_attached():
+    calls = _js_session_calls("1", "iframe-target")
+    attached = [k["targetId"] for m, k in calls if m == "Target.attachToTarget"]
+    detached = [k["sessionId"] for m, k in calls if m == "Target.detachFromTarget"]
+    assert attached == ["iframe-target"]
+    assert detached == ["sess-1"], f"js(target_id=...) must release its session; calls: {calls}"
+    assert [m for m, _ in calls][-1] == "Target.detachFromTarget"
+
+
+def test_js_without_target_never_attaches_or_detaches():
+    calls = _js_session_calls("1", None)
+    assert [m for m, _ in calls] == ["Runtime.evaluate"]
+
+
+def test_js_with_target_detaches_even_when_evaluation_fails():
+    def boom(_kwargs):
+        raise RuntimeError("evaluation failed")
+
+    calls = _js_session_calls("1", "iframe-target", evaluate=boom)
+    assert [m for m, _ in calls] == ["Target.attachToTarget", "Runtime.evaluate", "Target.detachFromTarget"]
+
+
+def test_js_with_target_reuses_one_session_across_the_return_retry():
+    seen = []
+
+    def evaluate(kwargs):
+        seen.append(kwargs["session_id"])
+        if len(seen) == 1:
+            raise RuntimeError("SyntaxError: Illegal return statement")
+        return {"result": {"type": "number", "value": 1}}
+
+    calls = _js_session_calls("return 1", "iframe-target", evaluate=evaluate)
+    assert seen == ["sess-1", "sess-1"]
+    assert [m for m, _ in calls].count("Target.detachFromTarget") == 1
