@@ -154,31 +154,39 @@ def test_fill_input_raises_when_element_not_found():
             helpers.fill_input("#missing", "hello")
 
 
-def test_fill_input_clear_first_sends_select_all_then_backspace():
-    import sys
+_MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+_LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-    key_events = []
+
+def _fill_input_cdp_calls(monkeypatch, user_agent, texts=("x",)):
+    """fill_input(clear_first=True) each text against a browser with this user_agent; returns cdp calls."""
+    monkeypatch.setattr(helpers, "_SELECT_ALL_MODIFIER", None)
+    calls = []
 
     def fake_cdp(method, **kwargs):
-        if method == "Input.dispatchKeyEvent":
-            key_events.append(kwargs)
-        return {}
-
-    def fake_js(expr, **kwargs):
-        return True  # element found
+        calls.append((method, kwargs))
+        return {"userAgent": user_agent} if method == "Browser.getVersion" and user_agent is not None else {}
 
     with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
-         patch("browser_harness.helpers.js", side_effect=fake_js):
-        helpers.fill_input("#inp", "x", clear_first=True)
+         patch("browser_harness.helpers.js", return_value=True):  # element found
+        for text in texts:
+            helpers.fill_input("#inp", text, clear_first=True)
+    return calls
 
-    # The "a" must be dispatched with the platform-correct modifier (Meta=4 on
-    # macOS, Ctrl=2 elsewhere). Without the modifier, the field would never get
-    # selected — it would just receive a literal "a".
-    expected_mod = 4 if sys.platform == "darwin" else 2
+
+def test_fill_input_clear_first_sends_select_all_then_backspace(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _MAC_UA)
+    key_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent"]
+
+    # The "a" must carry the modifier of the browser's OS (Meta=4 on macOS,
+    # Ctrl=2 elsewhere), not this process's. Without the modifier, the field
+    # would never get selected — it would just receive a literal "a".
     a_events = [e for e in key_events if e.get("key") == "a"]
     assert a_events, "expected an 'a' key event for select-all"
-    assert all(e.get("modifiers") == expected_mod for e in a_events), \
-        f"select-all 'a' must carry modifiers={expected_mod}; got {[e.get('modifiers') for e in a_events]}"
+    assert all(e.get("modifiers") == 4 for e in a_events), \
+        f"select-all 'a' must carry modifiers=4 for a macOS browser; got {[e.get('modifiers') for e in a_events]}"
+    assert a_events[0].get("commands") == ["SelectAll"]
+    assert "commands" not in a_events[-1]
 
     # Crucial: no `char` event for the "a" — emitting one makes Chrome treat
     # Cmd/Ctrl+A as a printable letter instead of a shortcut.
@@ -188,6 +196,26 @@ def test_fill_input_clear_first_sends_select_all_then_backspace():
     # Backspace still fires (via press_key, which uses keyDown).
     keys_down = [e.get("key") for e in key_events if e.get("type") in ("keyDown", "rawKeyDown")]
     assert "Backspace" in keys_down
+
+
+def test_fill_input_clear_first_uses_ctrl_for_linux_browser(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _LINUX_UA)
+    a_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent" and kw.get("key") == "a"]
+    assert a_events, "expected an 'a' key event for select-all"
+    assert all(e.get("modifiers") == 2 for e in a_events), \
+        f"select-all 'a' must carry modifiers=2 for a Linux browser; got {[e.get('modifiers') for e in a_events]}"
+
+
+def test_fill_input_clear_first_defaults_to_ctrl_without_a_user_agent(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, None)
+    a_events = [kw for m, kw in calls if m == "Input.dispatchKeyEvent" and kw.get("key") == "a"]
+    assert a_events
+    assert all(e.get("modifiers") == 2 for e in a_events)
+
+
+def test_fill_input_queries_browser_os_once(monkeypatch):
+    calls = _fill_input_cdp_calls(monkeypatch, _LINUX_UA, texts=("x", "y"))
+    assert [m for m, _ in calls].count("Browser.getVersion") == 1
 
 
 def test_fill_input_no_clear_skips_ctrl_a():
@@ -466,3 +494,116 @@ def test_new_tab_reuses_an_empty_data_document(monkeypatch):
 
     assert helpers.new_tab("https://example.com") == "target-placeholder"
     assert calls == [("goto_url", "https://example.com")]
+
+
+# --- press_key physical key identity (#685) ---
+
+
+def _key_events(key, modifiers=0):
+    events = []
+
+    def fake_cdp(method, **kwargs):
+        if method == "Input.dispatchKeyEvent":
+            events.append(kwargs)
+        return {}
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+        helpers.press_key(key, modifiers)
+    return events
+
+
+@pytest.mark.parametrize(
+    "char, code, vk, shift",
+    [
+        ("a", "KeyA", 65, False),
+        ("A", "KeyA", 65, True),
+        ("z", "KeyZ", 90, False),
+        ("1", "Digit1", 49, False),
+        ("!", "Digit1", 49, True),
+        ("0", "Digit0", 48, False),
+        (")", "Digit0", 48, True),
+        ("/", "Slash", 191, False),
+        ("?", "Slash", 191, True),
+        (";", "Semicolon", 186, False),
+        (":", "Semicolon", 186, True),
+        ("-", "Minus", 189, False),
+        ("_", "Minus", 189, True),
+        ("`", "Backquote", 192, False),
+        ("~", "Backquote", 192, True),
+        ("\\", "Backslash", 220, False),
+        ("|", "Backslash", 220, True),
+        ("'", "Quote", 222, False),
+        ('"', "Quote", 222, True),
+        (" ", "Space", 32, False),
+    ],
+)
+def test_press_key_sends_the_physical_key_a_real_keyboard_would(char, code, vk, shift):
+    """`code` is the physical key, never the character; the VK is not ord(char).
+
+    ord() only coincides for A-Z and 0-9 -- "a" is VK 65 not 97, and "/" is
+    VK 191 not 47 -- so anything reading e.code or e.keyCode saw values no
+    keyboard can produce.
+    """
+    events = _key_events(char)
+    down = events[0]
+
+    assert down["key"] == char
+    assert down["code"] == code
+    assert down["windowsVirtualKeyCode"] == vk
+    assert down["nativeVirtualKeyCode"] == vk
+    assert bool(down["modifiers"] & 8) is shift
+    # The character still reaches the page via the char event.
+    assert [e for e in events if e["type"] == "char"][0]["text"] == char
+
+
+@pytest.mark.parametrize("char", ["\u00e9", "\u4e2d", "\U0001F600"])
+def test_press_key_claims_no_physical_key_for_non_us_characters(char):
+    """No US key produces these, so report none rather than a fabricated one."""
+    events = _key_events(char)
+    down = events[0]
+
+    assert down["code"] == ""
+    assert down["windowsVirtualKeyCode"] == 0
+    assert [e for e in events if e["type"] == "char"][0]["text"] == char
+
+
+@pytest.mark.parametrize("modifiers", [1, 2, 4])
+def test_press_key_does_not_add_shift_to_a_shortcut(modifiers):
+    """press_key("A", modifiers=2) means Ctrl+A, not Ctrl+Shift+A.
+
+    Auto-shifting uppercase is right when typing text, but here the caller is
+    composing a shortcut and their intent has to win.
+    """
+    events = _key_events("A", modifiers)
+
+    assert all(e["modifiers"] == modifiers for e in events)
+    assert not any(e["type"] == "char" for e in events)
+
+
+@pytest.mark.parametrize(
+    "key, code, vk",
+    [("Enter", "Enter", 13), ("Backspace", "Backspace", 8),
+     ("ArrowLeft", "ArrowLeft", 37), ("Tab", "Tab", 9), ("Escape", "Escape", 27)],
+)
+def test_press_key_leaves_named_keys_alone(key, code, vk):
+    down = _key_events(key)[0]
+    assert (down["code"], down["windowsVirtualKeyCode"]) == (code, vk)
+    assert down["modifiers"] == 0
+
+
+def test_fill_input_types_each_character_as_a_real_key():
+    """fill_input() exists to emit real key events, so its codes must be real."""
+    events = []
+
+    def fake_cdp(method, **kwargs):
+        if method == "Input.dispatchKeyEvent":
+            events.append(kwargs)
+        return {}
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
+         patch("browser_harness.helpers.js", side_effect=lambda *_a, **_k: True):
+        helpers.fill_input("#inp", "Hi!", clear_first=False)
+
+    typed = [(e["key"], e["code"], e["windowsVirtualKeyCode"], bool(e["modifiers"] & 8))
+             for e in events if e["type"] == "keyDown"]
+    assert typed == [("H", "KeyH", 72, True), ("i", "KeyI", 73, False), ("!", "Digit1", 49, True)]
