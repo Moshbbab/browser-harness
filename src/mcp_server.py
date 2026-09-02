@@ -21,15 +21,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
 from mcp.server import MCPServer
+from PIL import Image
 
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import (
     capture_screenshot,
+    cdp,
     click_at_xy,
     close_tab,
-    cdp,
     current_tab,
     ensure_real_tab,
     fill_input,
@@ -128,7 +128,7 @@ def _tool(fn):
             with _stderr_stdout():
                 result = fn(*args, **kwargs)
             return _dump(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- MCP tools must serialize arbitrary browser failures.
             return _dump({"error": str(exc)})
 
     return SERVER.tool(name=fn.__name__, description=fn.__doc__ or "")(wrapper)
@@ -259,7 +259,7 @@ def browser_js(expression: str, target_id: str | None = None):
 
 
 @_tool
-def browser_cdp(method: str, params: dict = {}):
+def browser_cdp(method: str, params: dict | None = None):
     """Call a raw Chrome DevTools Protocol method. `params` are passed as kwargs."""
     return cdp(method, **(params or {}))
 
@@ -290,5 +290,10 @@ def browser_stop_recording():
     return {"recording_dir": stop_recording()}
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run the Browser Harness MCP server over stdio."""
     SERVER.run()
+
+
+if __name__ == "__main__":
+    main()
