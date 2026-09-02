@@ -693,9 +693,9 @@ def test_js_surfaces_an_unexpected_detach_failure_after_success():
             return {"sessionId": "sess-1"}
         if method == "Runtime.evaluate":
             return {"result": {"type": "number", "value": 7}}
-        raise RuntimeError("daemon unreachable")
+        raise RuntimeError("session broker unreachable")
 
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="daemon unreachable"):
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="session broker unreachable"):
         helpers.js("7", target_id="iframe-target")
 
 
@@ -708,4 +708,18 @@ def test_js_keeps_the_evaluation_error_when_detach_also_fails():
         raise RuntimeError("daemon unreachable")
 
     with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="evaluation failed"):
+        helpers.js("7", target_id="iframe-target")
+
+
+def test_js_keeps_base_exception_from_evaluation_when_detach_also_raises():
+    def fake_cdp(method, **kwargs):
+        if method == "Target.attachToTarget":
+            return {"sessionId": "sess-1"}
+        if method == "Runtime.evaluate":
+            raise KeyboardInterrupt("evaluation interrupted")
+        raise KeyboardInterrupt("detach interrupted")
+
+    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(
+        KeyboardInterrupt, match="evaluation interrupted"
+    ):
         helpers.js("7", target_id="iframe-target")

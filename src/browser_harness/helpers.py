@@ -570,8 +570,10 @@ def js(expression, target_id=None):
     except BaseException:
         # Keep the evaluation error; a detach failure here must not replace it.
         if sid:
-            try: _detach_iframe_session(sid)
-            except Exception: pass
+            try:
+                _detach_iframe_session(sid)
+            except BaseException:
+                pass
         raise
     if sid:
         _detach_iframe_session(sid)
@@ -594,7 +596,8 @@ def _detach_iframe_session(sid):
     try:
         cdp("Target.detachFromTarget", sessionId=sid)
     except Exception as e:
-        if "session" in str(e).lower():
+        message = str(e).lower()
+        if "no session with given id" in message or "session with given id not found" in message:
             return
         raise
 
