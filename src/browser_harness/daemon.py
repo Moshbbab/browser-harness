@@ -46,6 +46,7 @@ _MAC_PROFILES = (
     "Library/Application Support/Microsoft Edge Dev",
     "Library/Application Support/Microsoft Edge Canary",
     "Library/Application Support/BraveSoftware/Brave-Browser",
+    "Library/Application Support/BraveSoftware/Brave-Origin",
 )
 _LINUX_PROFILES = (
     ".config/google-chrome",
