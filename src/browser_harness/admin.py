@@ -928,6 +928,7 @@ _BROWSER_LAUNCH = (
     ("chromium", "Chromium", ("chromium", "chromium-browser"), "chromium"),
     ("chrome", "Google Chrome", ("google-chrome-stable", "google-chrome"), "chrome"),
     ("edge", "Microsoft Edge", ("microsoft-edge", "microsoft-edge-stable"), "msedge"),
+    ("brave-origin", "Brave Origin", (), None),
     ("brave", "Brave Browser", ("brave-browser", "brave"), "brave"),
     ("arc", "Arc", (), None),
     ("dia", "Dia", (), None),
