@@ -74,6 +74,47 @@ def _fresh_daemon():
     return d
 
 
+@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
+def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch, value):
+    monkeypatch.setenv("BH_TAB_MARKER", value)
+    d = _fresh_daemon()
+
+    async def run():
+        await d.handle({
+            "meta": "set_session",
+            "session_id": "session-without-marker",
+            "target_id": "target-without-marker",
+        })
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert not [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"]
+
+
+def test_tab_marker_stays_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("BH_TAB_MARKER", raising=False)
+    d = _fresh_daemon()
+
+    async def run():
+        await d.handle({
+            "meta": "set_session",
+            "session_id": "session-with-marker",
+            "target_id": "target-with-marker",
+        })
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"] == [
+        (
+            "Runtime.evaluate",
+            {"expression": daemon.TAB_MARKER_JS},
+            "session-with-marker",
+        )
+    ]
+
+
 def test_set_session_enables_all_four_default_domains_on_new_session():
     """Regression: switch_tab() / new_tab() in helpers.py route through the
     `set_session` IPC, which previously only enabled Page on the new

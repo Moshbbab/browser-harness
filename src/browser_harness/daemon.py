@@ -97,6 +97,12 @@ TOGGLE_BOOT_GRACE = 12
 # Cancellation should make an in-flight CDP call finish immediately. Keep the
 # drain bounded anyway so shutdown fails closed if a client ignores cancellation.
 RECOVERY_CANCEL_DRAIN_TIMEOUT = 2
+TAB_MARKER_JS = "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
+
+
+def tab_marker_enabled():
+    """Whether the cosmetic controlled-tab title marker should be added."""
+    return os.environ.get("BH_TAB_MARKER", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _devtools_port_live(base):
@@ -574,6 +580,19 @@ class Daemon:
                 return False
         return self._recoveries_idle.is_set()
 
+    def _schedule_tab_marker(self, session_id):
+        """Mark the controlled tab without extending the synchronous IPC path."""
+        if not tab_marker_enabled():
+            return None
+        return asyncio.create_task(_silent(asyncio.wait_for(
+            self.cdp.send_raw(
+                "Runtime.evaluate",
+                {"expression": TAB_MARKER_JS},
+                session_id=session_id,
+            ),
+            timeout=2,
+        )))
+
     async def start(self):
         self.stop = asyncio.Event()
         url = get_ws_url()
@@ -599,7 +618,6 @@ class Daemon:
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
-        mark_js = "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
             if method == "Page.javascriptDialogOpening":
@@ -607,7 +625,7 @@ class Daemon:
             elif method == "Page.javascriptDialogClosed":
                 self.dialog = None
             elif method in ("Page.loadEventFired", "Page.domContentEventFired"):
-                asyncio.create_task(_silent(asyncio.wait_for(self.cdp.send_raw("Runtime.evaluate", {"expression": mark_js}, session_id=self.session), timeout=2)))
+                self._schedule_tab_marker(self.session)
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
 
@@ -683,14 +701,7 @@ class Daemon:
             await asyncio.gather(*tasks)
             # 🐴 tab-marker title prefix is purely cosmetic — fire-and-forget so
             # it doesn't add to the synchronous IPC budget.
-            asyncio.create_task(_silent(asyncio.wait_for(
-                self.cdp.send_raw(
-                    "Runtime.evaluate",
-                    {"expression": "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"},
-                    session_id=new_session,
-                ),
-                timeout=2,
-            )))
+            self._schedule_tab_marker(new_session)
             return {"session_id": new_session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
         if meta == "shutdown":
