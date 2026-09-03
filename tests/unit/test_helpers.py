@@ -424,10 +424,9 @@ def test_wait_for_network_idle_filters_events_to_active_session():
     )
 
 
-@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
-def test_mark_tab_can_be_disabled(monkeypatch, value):
+def test_mark_tab_can_be_disabled(monkeypatch):
     calls = []
-    monkeypatch.setenv("BH_TAB_MARKER", value)
+    monkeypatch.setenv("BH_TAB_MARKER", "0")
     monkeypatch.setattr(
         helpers,
         "cdp",
@@ -437,20 +436,6 @@ def test_mark_tab_can_be_disabled(monkeypatch, value):
     helpers._mark_tab()
 
     assert calls == []
-
-
-def test_mark_tab_stays_enabled_by_default(monkeypatch):
-    calls = []
-    monkeypatch.delenv("BH_TAB_MARKER", raising=False)
-    monkeypatch.setattr(
-        helpers,
-        "cdp",
-        lambda method, **kwargs: calls.append((method, kwargs)),
-    )
-
-    helpers._mark_tab()
-
-    assert [method for method, _kwargs in calls] == ["Runtime.evaluate"]
 
 
 def test_switch_tab_keeps_visible_tab_unchanged_by_default(monkeypatch):

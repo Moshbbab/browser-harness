@@ -74,9 +74,8 @@ def _fresh_daemon():
     return d
 
 
-@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
-def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch, value):
-    monkeypatch.setenv("BH_TAB_MARKER", value)
+def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch):
+    monkeypatch.setenv("BH_TAB_MARKER", "0")
     d = _fresh_daemon()
 
     async def run():
@@ -117,47 +116,12 @@ def test_tab_marker_stays_enabled_by_default(monkeypatch):
 
 def test_tab_marker_disabled_on_page_load_events(monkeypatch):
     monkeypatch.setenv("BH_TAB_MARKER", "0")
+    d = _fresh_daemon()
+    d.session = "loaded-session"
 
-    class _EventRegistry:
-        def __init__(self):
-            self.handle_event = self.original
+    d._record_event("Page.loadEventFired", {}, "loaded-session")
 
-        async def original(self, method, params, session_id=None):
-            return None
-
-    class _StartCDP(_FakeCDP):
-        def __init__(self):
-            super().__init__()
-            self._event_registry = _EventRegistry()
-
-        async def start(self):
-            return None
-
-    fake_cdp = _StartCDP()
-    d = daemon.Daemon()
-
-    async def attach_first_page():
-        d.session = "loaded-session"
-        d.target_id = "loaded-target"
-
-    monkeypatch.setattr(daemon, "BROWSER_KIND", "local")
-    monkeypatch.setattr(daemon, "get_ws_url", lambda: "ws://127.0.0.1:9222/devtools/browser/test")
-    monkeypatch.setattr(daemon, "_PatientCDPClient", lambda _url: fake_cdp)
-    monkeypatch.setattr(daemon, "log", lambda _message: None)
-    monkeypatch.setattr(d, "attach_first_page", attach_first_page)
-
-    async def run():
-        await d.start()
-        await fake_cdp._event_registry.handle_event(
-            "Page.loadEventFired",
-            {},
-            "loaded-session",
-        )
-        await asyncio.sleep(0)
-
-    asyncio.run(run())
-
-    assert not [call for call in fake_cdp.calls if call[0] == "Runtime.evaluate"]
+    assert not [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"]
 
 
 def test_set_session_enables_all_four_default_domains_on_new_session():

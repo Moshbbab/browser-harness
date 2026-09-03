@@ -593,6 +593,15 @@ class Daemon:
             timeout=2,
         )))
 
+    def _record_event(self, method, params, session_id=None):
+        self.events.append({"method": method, "params": params, "session_id": session_id})
+        if method == "Page.javascriptDialogOpening":
+            self.dialog = params
+        elif method == "Page.javascriptDialogClosed":
+            self.dialog = None
+        elif method in ("Page.loadEventFired", "Page.domContentEventFired"):
+            self._schedule_tab_marker(self.session)
+
     async def start(self):
         self.stop = asyncio.Event()
         url = get_ws_url()
@@ -619,13 +628,7 @@ class Daemon:
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
         async def tap(method, params, session_id=None):
-            self.events.append({"method": method, "params": params, "session_id": session_id})
-            if method == "Page.javascriptDialogOpening":
-                self.dialog = params
-            elif method == "Page.javascriptDialogClosed":
-                self.dialog = None
-            elif method in ("Page.loadEventFired", "Page.domContentEventFired"):
-                self._schedule_tab_marker(self.session)
+            self._record_event(method, params, session_id)
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
 
