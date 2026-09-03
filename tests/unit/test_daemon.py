@@ -74,8 +74,9 @@ def _fresh_daemon():
     return d
 
 
-def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch):
-    monkeypatch.setenv("BH_TAB_MARKER", "0")
+@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
+def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch, value):
+    monkeypatch.setenv("BH_TAB_MARKER", value)
     d = _fresh_daemon()
 
     async def run():
@@ -114,8 +115,9 @@ def test_tab_marker_stays_enabled_by_default(monkeypatch):
     ]
 
 
-def test_tab_marker_disabled_on_page_load_events(monkeypatch):
-    monkeypatch.setenv("BH_TAB_MARKER", "0")
+@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
+def test_tab_marker_disabled_on_page_load_events(monkeypatch, value):
+    monkeypatch.setenv("BH_TAB_MARKER", value)
     d = _fresh_daemon()
     d.session = "loaded-session"
 
