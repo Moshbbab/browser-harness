@@ -970,3 +970,54 @@ def test_run_update_of_installed_wheel_never_pulls_an_enclosing_repo(tmp_path, m
         f"run_update must not shell out to git for a wheel install; ran {commands}"
     )
     assert ["uv", "tool", "upgrade", "browser-harness"] in commands
+
+def _wheel_update_env(tmp_path, monkeypatch):
+    """Set up a wheel install so run_update() takes the pypi branch."""
+    project = tmp_path / "my-project"
+    (project / ".git").mkdir(parents=True)
+    _fake_install(
+        monkeypatch,
+        project / ".venv" / "lib" / "python3.12" / "site-packages" / "browser_harness",
+    )
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda *a, **k: "0.2.0")
+    monkeypatch.setattr(admin, "_cache_read", lambda: {})
+    monkeypatch.setattr(admin, "_cache_write", lambda data: None)
+    monkeypatch.setattr(admin, "daemon_alive", lambda *a, **k: False)
+
+
+def test_failed_upgrade_tells_a_pip_install_how_to_upgrade(tmp_path, monkeypatch, capsys):
+    """A pip or pipx install is invisible to `uv tool upgrade`, so the bare failure
+    has to name the documented uv install instead of just exiting non-zero."""
+    import subprocess
+
+    _wheel_update_env(tmp_path, monkeypatch)
+
+    def fake_run(command, *args, **kwargs):
+        if list(command)[:3] == ["uv", "tool", "list"]:
+            return subprocess.CompletedProcess(command, 0, "some-other-tool v1.0.0\n", "")
+        return subprocess.CompletedProcess(command, 1, "", "`browser-harness` is not installed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert admin.run_update(yes=True) == 1
+    assert "uv tool install --python 3.12 --upgrade --force browser-harness" in capsys.readouterr().err
+
+
+def test_failed_upgrade_stays_quiet_for_a_uv_managed_install(tmp_path, monkeypatch, capsys):
+    """When uv owns the tool the failure is uv's own (offline, auth), so a pip hint
+    would only mislead."""
+    import subprocess
+
+    _wheel_update_env(tmp_path, monkeypatch)
+
+    def fake_run(command, *args, **kwargs):
+        if list(command)[:3] == ["uv", "tool", "list"]:
+            return subprocess.CompletedProcess(command, 0, "browser-harness v0.1.0\n", "")
+        return subprocess.CompletedProcess(command, 1, "", "network unreachable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert admin.run_update(yes=True) == 1
+    assert "pip or pipx" not in capsys.readouterr().err
+

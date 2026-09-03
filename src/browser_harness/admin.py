@@ -1204,6 +1204,21 @@ def _prompt_yes(question, default_yes=True, yes=False):
     return ans.startswith("y")
 
 
+def _uv_manages_browser_harness():
+    """True when `uv tool list` shows browser-harness, i.e. `uv tool upgrade` owns it.
+
+    Unknown counts as managed: if uv cannot be run or its output is unreadable we
+    stay quiet rather than tell a uv user to reinstall with pip.
+    """
+    try:
+        listed = subprocess.run(["uv", "tool", "list"], capture_output=True, text=True)
+    except OSError:
+        return True
+    if listed.returncode != 0:
+        return True
+    return "browser-harness" in (listed.stdout or "")
+
+
 def run_update(yes=False):
     """Pull the latest version and (after prompt) restart the daemon so it picks up changed code.
 
@@ -1240,12 +1255,16 @@ def run_update(yes=False):
         tool_upgrade = subprocess.run(["uv", "tool", "upgrade", "browser-harness"])
         if tool_upgrade.returncode != 0:
             # `uv tool upgrade` only manages what `uv tool install` put there, so a pip
-            # or pipx install fails here with "`browser-harness` is not installed".
-            print(
-                "if you installed with pip or pipx, upgrade with: "
-                "uv tool install --python 3.12 --upgrade --force browser-harness",
-                file=sys.stderr,
-            )
+            # or pipx install fails here with "`browser-harness` is not installed" and
+            # no way forward. Point only those users at the documented install: when the
+            # tool IS uv-managed the failure is uv's own (offline, auth) and its message
+            # already stands, so adding a pip hint there would just mislead.
+            if not _uv_manages_browser_harness():
+                print(
+                    "if you installed with pip or pipx, upgrade with: "
+                    "uv tool install --python 3.12 --upgrade --force browser-harness",
+                    file=sys.stderr,
+                )
             return tool_upgrade.returncode
     else:
         print("unknown install mode; can't auto-update.", file=sys.stderr)
