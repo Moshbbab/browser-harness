@@ -1239,6 +1239,13 @@ def run_update(yes=False):
     elif mode == "pypi":
         tool_upgrade = subprocess.run(["uv", "tool", "upgrade", "browser-harness"])
         if tool_upgrade.returncode != 0:
+            # `uv tool upgrade` only manages what `uv tool install` put there, so a pip
+            # or pipx install fails here with "`browser-harness` is not installed".
+            print(
+                "if you installed with pip or pipx, upgrade with: "
+                "uv tool install --python 3.12 --upgrade --force browser-harness",
+                file=sys.stderr,
+            )
             return tool_upgrade.returncode
     else:
         print("unknown install mode; can't auto-update.", file=sys.stderr)
