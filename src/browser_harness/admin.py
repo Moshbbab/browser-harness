@@ -1216,7 +1216,16 @@ def _uv_manages_browser_harness():
         return True
     if listed.returncode != 0:
         return True
-    return "browser-harness" in (listed.stdout or "")
+    # `uv tool list` prints one "name vX.Y.Z" line per tool, then its executables as
+    # "- exe" lines. Match the entry name, so a tool merely containing our name (say
+    # my-browser-harness-wrapper) cannot silence the hint for a real pip install.
+    for line in (listed.stdout or "").splitlines():
+        entry = line.strip()
+        if entry.startswith("-"):
+            continue
+        if entry.split(" ", 1)[0] == "browser-harness":
+            return True
+    return False
 
 
 def run_update(yes=False):

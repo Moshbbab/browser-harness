@@ -1021,3 +1021,21 @@ def test_failed_upgrade_stays_quiet_for_a_uv_managed_install(tmp_path, monkeypat
     assert admin.run_update(yes=True) == 1
     assert "pip or pipx" not in capsys.readouterr().err
 
+def test_failed_upgrade_ignores_a_lookalike_uv_tool_name(tmp_path, monkeypatch, capsys):
+    """A tool merely containing our name must not silence the hint for a pip install."""
+    import subprocess
+
+    _wheel_update_env(tmp_path, monkeypatch)
+
+    def fake_run(command, *args, **kwargs):
+        if list(command)[:3] == ["uv", "tool", "list"]:
+            return subprocess.CompletedProcess(
+                command, 0, "my-browser-harness-wrapper v2.0.0\n- bhw\n", ""
+            )
+        return subprocess.CompletedProcess(command, 1, "", "`browser-harness` is not installed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert admin.run_update(yes=True) == 1
+    assert "uv tool install --python 3.12 --upgrade --force browser-harness" in capsys.readouterr().err
+
