@@ -36,6 +36,8 @@ PY
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background; call `activate_tab(target)` only when the user explicitly asks
   or a page demonstrably pauses rendering while hidden.
+- Set `BH_TAB_MARKER=0` before starting the daemon to leave page titles unchanged.
+  The horse marker remains enabled by default.
 - A timed-out `scroll(...)` on an attached background tab is evidence that the
   page needs to be visible. Call `activate_tab(current_tab())`, retry the same
   scroll once, then re-read the scroll position. This visibly switches tabs,

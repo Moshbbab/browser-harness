@@ -387,6 +387,8 @@ def current_tab():
 
 def _mark_tab():
     """Prepend horse emoji to tab title so the user can see which tab the agent controls."""
+    if os.environ.get("BH_TAB_MARKER", "").strip().lower() in {"0", "false", "no", "off"}:
+        return
     try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
     except Exception: pass
 
