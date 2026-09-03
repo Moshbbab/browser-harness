@@ -566,10 +566,39 @@ def js(expression, target_id=None):
     """
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
     try:
+        result = _js_evaluate(expression, sid)
+    except BaseException:
+        # Keep the evaluation error; a detach failure here must not replace it.
+        if sid:
+            try:
+                _detach_iframe_session(sid)
+            except BaseException:
+                pass
+        raise
+    if sid:
+        _detach_iframe_session(sid)
+    return result
+
+
+def _js_evaluate(expression, sid):
+    try:
         return _runtime_evaluate(expression, session_id=sid, await_promise=True)
     except RuntimeError as e:
         if _is_illegal_return_error(e):
             return _runtime_evaluate(_wrap_js_function(expression), session_id=sid, await_promise=True)
+        raise
+
+
+def _detach_iframe_session(sid):
+    """Release the session js(target_id=...) attached so polling loops do not
+    accumulate one live session (and one event stream) per call. A session that
+    Chrome already dropped (iframe navigated or closed) is not a leak."""
+    try:
+        cdp("Target.detachFromTarget", sessionId=sid)
+    except Exception as e:
+        message = str(e).lower()
+        if "no session with given id" in message or "session with given id not found" in message:
+            return
         raise
 
 
