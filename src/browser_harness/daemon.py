@@ -117,10 +117,11 @@ _REMOTE_STOPPED = False
 BROWSER_KIND = "cloud" if REMOTE_ID else ("cdp" if (os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL")) else "local")
 # Chrome 144+ shows a per-connection popup, and the connection that raised it is
 # the only thing keeping it on screen. 45s expired while the user was in another
-# app, which dropped the popup and made the next call raise a fresh one. Ten
-# hours covers a workday or laptop sleep without imposing an infinite stuck
-# process; BH_ALLOW_TIMEOUT lets unattended runs fail sooner.
-def _allow_timeout(default=36000.0):
+# app, which dropped the popup and made the next call raise a fresh one. One
+# hour gives the user or an accessibility helper time to approve without
+# imposing an infinite stuck process; BH_ALLOW_TIMEOUT lets unattended runs
+# fail sooner or interactive runs wait longer.
+def _allow_timeout(default=3600.0):
     raw = os.environ.get("BH_ALLOW_TIMEOUT")
     if not raw:
         return default

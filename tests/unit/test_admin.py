@@ -1065,8 +1065,8 @@ def test_ensure_daemon_returns_when_the_parked_daemon_finishes(tmp_path, monkeyp
     admin_mod.ensure_daemon(wait=5.0)  # returns, does not raise
 
 
-def test_ensure_daemon_replaces_pending_child_that_exited(tmp_path, monkeypatch):
-    """A dead pending PID must not leave callers waiting on its stale log."""
+def test_ensure_daemon_does_not_replace_pending_approval_that_exited(tmp_path, monkeypatch):
+    """A failed approval attempt must not create another Chrome prompt."""
     from browser_harness import admin as admin_mod
 
     pid_file = tmp_path / "daemon.pid"
@@ -1091,9 +1091,9 @@ def test_ensure_daemon_replaces_pending_child_that_exited(tmp_path, monkeypatch)
     spawned = []
     monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: spawned.append(a) or Dead())
 
-    with pytest.raises(RuntimeError, match="didn't come up"):
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
         admin_mod.ensure_daemon(wait=0.1)
-    assert spawned, "the dead pending child must be replaced"
+    assert spawned == []
 
 
 def test_dead_pending_cleanup_does_not_unlink_successor(tmp_path, monkeypatch):
@@ -1118,7 +1118,7 @@ def test_dead_pending_cleanup_does_not_unlink_successor(tmp_path, monkeypatch):
     monkeypatch.setattr(admin_mod, "_pending_pid_record", old_dies_as_successor_arrives)
     monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop after cleanup")))
 
-    with pytest.raises(RuntimeError, match="stop after cleanup"):
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
         admin_mod.ensure_daemon(wait=0.1)
     assert pid_file.read_text() == "222"
 
@@ -1127,12 +1127,56 @@ def test_allow_timeout_is_patient_and_configurable(monkeypatch):
     from browser_harness import daemon as daemon_mod
 
     monkeypatch.delenv("BH_ALLOW_TIMEOUT", raising=False)
-    assert daemon_mod._allow_timeout() == 36000
+    assert daemon_mod._allow_timeout() == 3600
     monkeypatch.setenv("BH_ALLOW_TIMEOUT", "30")
     assert daemon_mod._allow_timeout() == 30
     for bad in ("", "nonsense", "0", "-5", "inf", "-inf", "nan"):
         monkeypatch.setenv("BH_ALLOW_TIMEOUT", bad)
-        assert daemon_mod._allow_timeout() == 36000
+        assert daemon_mod._allow_timeout() == 3600
+
+
+def test_default_local_wait_matches_allow_window_without_affecting_remote(monkeypatch):
+    from browser_harness import admin as admin_mod
+    from browser_harness import daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "LOCAL_HANDSHAKE_TIMEOUT", 3600)
+    assert admin_mod._daemon_wait_windows(None, local=True) == (60.0, 3600.0)
+    assert admin_mod._daemon_wait_windows(None, local=False) == (60.0, 60.0)
+    assert admin_mod._daemon_wait_windows(7, local=True) == (7.0, 7.0)
+
+
+def test_permission_blocked_exit_is_not_retried(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    log_file = tmp_path / "daemon.log"
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    monkeypatch.setattr(admin_mod.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_starting_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "permission-blocked: approval expired")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "start")
+    monkeypatch.setattr(
+        admin_mod,
+        "restart_daemon",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("approval must not restart")),
+    )
+
+    class Dead:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    spawned = []
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: spawned.append(a) or Dead())
+
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
+        admin_mod.ensure_daemon(wait=0.1)
+    assert len(spawned) == 1
 
 
 def test_cold_spawn_publishes_child_before_releasing_lock(tmp_path, monkeypatch):

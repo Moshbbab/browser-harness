@@ -153,7 +153,7 @@ def _parked_log_grace():
 
         return float(LOCAL_HANDSHAKE_TIMEOUT) + 60
     except Exception:
-        return 36060.0
+        return 3660.0
 
 
 def _is_daemon_process(pid):
@@ -354,6 +354,21 @@ def _is_local_chrome_mode(env=None):
     )
 
 
+def _daemon_wait_windows(wait, local):
+    """Return normal startup and Chrome-approval wait windows in seconds."""
+    explicit_wait = wait is not None
+    startup_wait = float(wait) if explicit_wait else 60.0
+    approval_wait = startup_wait
+    if local and not explicit_wait:
+        try:
+            from .daemon import LOCAL_HANDSHAKE_TIMEOUT
+
+            approval_wait = float(LOCAL_HANDSHAKE_TIMEOUT)
+        except Exception:
+            approval_wait = 3600.0
+    return startup_wait, approval_wait
+
+
 def daemon_alive(name=None):
     # Ping handshake (not a bare connect) so a stale .port file + port reuse
     # after a daemon crash doesn't make us mistake an unrelated listener for ours.
@@ -511,7 +526,7 @@ def run_doctor_fix_snap():
     return 0
 
 
-def ensure_daemon(wait=60.0, name=None, env=None):
+def ensure_daemon(wait=None, name=None, env=None):
     """Idempotent. Self-heals stale daemon, closed Chrome (launches it), cold
     Chrome, and missing Allow on chrome://inspect."""
     if daemon_alive(name):
@@ -541,6 +556,10 @@ def ensure_daemon(wait=60.0, name=None, env=None):
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
+    startup_wait, approval_wait = _daemon_wait_windows(wait, local)
+    # Remote/CDP daemons retain the normal 60s startup bound. Only a local
+    # Chrome handshake displaying the per-connection approval sheet extends a
+    # default caller's deadline, so Browser Use cloud startup is unaffected.
     launched_browser = None
     opened_inspect = False
     for _ in range(3):
@@ -550,7 +569,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
         except OSError:
             stderr_sink = subprocess.DEVNULL
         if local:
-            with _spawn_lock(name, timeout=wait) as lock:
+            with _spawn_lock(name, timeout=startup_wait) as lock:
                 if lock.fd is None:
                     raise RuntimeError("daemon-starting: another browser-harness daemon is still starting; retry later")
                 if daemon_alive(name):
@@ -574,11 +593,12 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             )
         if stderr_sink is not subprocess.DEVNULL:
             stderr_sink.close()
-        spawned = time.time()
-        deadline = spawned + wait
+        spawned = time.monotonic()
+        deadline = spawned + startup_wait
         hinted = not local
+        approval_waiting = False
         pending_died = False
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             if daemon_alive(name):
                 _cleanup_unattached_browser_launch(launched_browser)
                 return
@@ -588,9 +608,19 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             if p is None and pending_pid and _pending_pid_record(ipc.pid_path(name or NAME)) != pending_pid:
                 pending_died = True
                 break
-            if not hinted and time.time() - spawned > 2 and (_log_tail(name) or "").startswith("handshake-wait"):
+            log_tail = _log_tail(name) or ""
+            if local and not approval_waiting and log_tail.startswith("handshake-wait"):
+                approval_waiting = True
+                deadline = max(deadline, spawned + approval_wait)
+            if not hinted and time.monotonic() - spawned > 2 and log_tail.startswith("handshake-wait"):
+                daemon_name = name or NAME
+                approve_command = (
+                    "browser-harness mac-approve"
+                    if daemon_name == "default"
+                    else f"BU_NAME={daemon_name} browser-harness mac-approve"
+                )
                 action = (
-                    "run `browser-harness mac-approve` in another shell or click Allow"
+                    f"run `{approve_command}` in another shell or click Allow"
                     if sys.platform == "darwin"
                     else "click Allow"
                 )
@@ -601,6 +631,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
                 hinted = True
             time.sleep(0.2)
         msg = _log_tail(name) or ""
+        permission_wait = local and (msg.startswith("handshake-wait") or _needs_chrome_permission_popup(msg))
         if local and pending_died:
             # Serialize cleanup with publishers and remove only the generation
             # we observed. Another waiter may already have published a healthy
@@ -611,21 +642,31 @@ def ensure_daemon(wait=60.0, name=None, env=None):
                         ipc.pid_path(name or NAME).unlink()
                     except FileNotFoundError:
                         pass
+            if permission_wait:
+                # A denied/expired approval may already have dropped its sheet.
+                # Never auto-spawn a replacement here: that would immediately
+                # create another Chrome prompt and recreate the retry loop.
+                raise RuntimeError(
+                    "permission-blocked: the pending Chrome connection ended before approval; "
+                    "browser-harness did not retry or create another connection."
+                )
             continue
         if local and msg.startswith("handshake-wait"):
             # Leave it running: this daemon's connection is what holds the popup
             # on screen. Killing it dropped the popup and the retry raised a new
             # one, which is how a single approval turned into an endless prompt.
             raise RuntimeError(
-                "permission-blocked: Chrome's Allow popup is still open and waiting -- click Allow in Chrome, then retry. "
-                "Do not restart the daemon; the same popup stays valid."
+                "permission-blocked: Chrome's Allow popup is still open and the pending daemon was left running. "
+                "Approve that exact popup; browser-harness did not retry or create another connection."
             )
         if local and _needs_chrome_permission_popup(msg):
-            print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
-            if not _parked_daemon_pid(name):
-                restart_daemon(name)
+            print(
+                'browser-harness: Chrome is asking "Allow remote debugging?". '
+                "Approve that exact popup; no replacement connection was started.",
+                file=sys.stderr,
+            )
             raise RuntimeError(
-                "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
+                "permission-blocked: Chrome did not approve the connection; browser-harness did not retry or create another connection."
             )
         if local and launched_browser is None and _chrome_not_running(msg):
             # Chrome is closed — launch the browser and retry
@@ -646,10 +687,13 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             from .daemon import remote_debugging_toggle_profiles, remote_debugging_user_enabled
             if remote_debugging_user_enabled():
                 # chrome://inspect toggle is already on — connection died
-                print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
-                restart_daemon(name)
+                print(
+                    'browser-harness: Chrome is asking "Allow remote debugging?". '
+                    "Approve that exact popup; no replacement connection was started.",
+                    file=sys.stderr,
+                )
                 raise RuntimeError(
-                    "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
+                    "permission-blocked: Chrome did not approve the connection; browser-harness did not retry or create another connection."
                 )
             restart_daemon(name)
             _open_chrome_inspect_once()
