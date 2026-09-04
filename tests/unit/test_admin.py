@@ -1354,3 +1354,32 @@ def test_restart_daemon_preserves_live_pending_without_fingerprint(tmp_path, mon
         admin_mod.restart_daemon("pending")
 
     assert pid_file.read_text() == "4321"
+
+
+def test_restart_daemon_does_not_cancel_successor_generation(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 111, "started": "old-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: 111)
+    generations = iter([(111, "old-start"), (222, "new-start")])
+    monkeypatch.setattr(
+        admin_mod,
+        "_fingerprinted_pending_generation",
+        lambda path: next(generations),
+    )
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("successor must not be signaled")),
+    )
+
+    with pytest.raises(RuntimeError, match="changed ownership; the successor was not signaled"):
+        admin_mod.restart_daemon("pending")
+
+    assert pid_file.exists()

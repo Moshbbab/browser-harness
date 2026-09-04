@@ -188,8 +188,8 @@ def _pending_pid_record(path):
     return pid if _is_daemon_process(pid) else None
 
 
-def _fingerprinted_pending_pid(path):
-    """Return a pending PID only when its published start fingerprint matches."""
+def _fingerprinted_pending_generation(path):
+    """Return (PID, start fingerprint) only while that generation is alive."""
     try:
         record = json.loads(path.read_text())
         pid = record["pid"]
@@ -199,7 +199,12 @@ def _fingerprinted_pending_pid(path):
     if type(pid) is not int or not 0 < pid < (1 << 31) or fingerprint is None:
         return None
     current = _process_start_time(pid)
-    return pid if current is not None and current == fingerprint else None
+    return (pid, fingerprint) if current is not None and current == fingerprint else None
+
+
+def _fingerprinted_pending_pid(path):
+    generation = _fingerprinted_pending_generation(path)
+    return generation[0] if generation is not None else None
 
 
 def _pid_number(path):
@@ -760,6 +765,12 @@ def restart_daemon(name=None, require_clean=False):
     name = name or NAME
     pending_path = ipc.pid_path(name)
     pid_path = str(pending_path)
+    pending_generation = None
+    pending_unverified = False
+    if (_log_tail(name) or "").startswith("handshake-wait"):
+        parked_pid = _parked_daemon_pid(name)
+        pending_generation = _fingerprinted_pending_generation(pending_path)
+        pending_unverified = parked_pid is not None and pending_generation is None
 
     # Two pieces of information are tracked separately:
     #   - daemon_pid: the daemon's self-reported PID, or None. Only daemons
@@ -773,15 +784,37 @@ def restart_daemon(name=None, require_clean=False):
     daemon_alive = daemon_pid is not None or ipc.ping(name, timeout=1.0)
     if require_clean and not daemon_alive:
         raise RuntimeError(f"daemon {name!r} is unavailable for required clean shutdown")
-    pending_pid = None
-    if not daemon_alive and (_log_tail(name) or "").startswith("handshake-wait"):
-        parked_pid = _parked_daemon_pid(name)
-        pending_pid = _fingerprinted_pending_pid(pending_path)
-        if parked_pid is not None and pending_pid is None:
-            raise RuntimeError(
-                f"pending daemon {name!r} is live but has no verifiable process fingerprint; "
-                "it was not signaled and its ownership records were preserved"
-            )
+    if not daemon_alive and pending_unverified:
+        raise RuntimeError(
+            f"pending daemon {name!r} is live but has no verifiable process fingerprint; "
+            "it was not signaled and its ownership records were preserved"
+        )
+    if not daemon_alive and pending_generation is not None:
+        with _spawn_lock(name, timeout=5.0) as owner_lock:
+            if owner_lock.fd is None:
+                raise RuntimeError(
+                    f"pending daemon {name!r} is changing ownership; it was not signaled"
+                )
+            current_generation = _fingerprinted_pending_generation(pending_path)
+            if current_generation != pending_generation:
+                raise RuntimeError(
+                    f"pending daemon {name!r} changed ownership; the successor was not signaled "
+                    "and its records were preserved"
+                )
+            if ipc.ping(name, timeout=0.2):
+                raise RuntimeError(
+                    f"pending daemon {name!r} became ready during cancellation; run --reload again"
+                )
+            try:
+                os.kill(pending_generation[0], signal.SIGTERM)
+            except (ProcessLookupError, OSError, SystemError, OverflowError):
+                pass
+            ipc.cleanup_endpoint(name)
+            try:
+                os.unlink(pid_path)
+            except FileNotFoundError:
+                pass
+        return
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
     # path tears down the socket and then waits on a slow remote `stop` PATCH),
@@ -842,15 +875,6 @@ def restart_daemon(name=None, require_clean=False):
                     os.kill(daemon_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError, SystemError, OverflowError):
                     pass
-
-    if pending_pid is not None and _fingerprinted_pending_pid(pending_path) == pending_pid:
-        # The pre-IPC daemon cannot receive meta:shutdown. The parent-published
-        # start fingerprint is its cancellation capability: re-check it at the
-        # signal boundary so a reused PID is never terminated.
-        try:
-            os.kill(pending_pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError, SystemError, OverflowError):
-            pass
 
     ipc.cleanup_endpoint(name)
     try:
