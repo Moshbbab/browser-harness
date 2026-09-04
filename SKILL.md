@@ -36,6 +36,12 @@ PY
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background; call `activate_tab(target)` only when the user explicitly asks
   or a page demonstrably pauses rendering while hidden.
+- A local daemon is a connection to the whole Chrome instance, not to one site,
+  task, card, or agent. Omit `BU_NAME` and reuse the default daemon for normal
+  sequential local work across websites, tabs, screenshots, and Codex turns.
+  Do not invent per-job names such as `gmail1375` or `slack1371`: every new
+  local daemon opens another browser-level CDP connection and Chrome may show
+  another Allow prompt.
 - Set `BH_TAB_MARKER=0` before starting the daemon to leave page titles unchanged.
   The horse marker remains enabled by default.
 - A timed-out `scroll(...)` on an attached background tab is evidence that the
@@ -46,6 +52,25 @@ PY
 - The normal local flow attaches to the running Chrome/Chromium CDP endpoint. No browser ids or local profile selection.
 
 ## Local Chrome
+
+The default daemon can keep many tabs and visit many sites; browser-harness has
+no per-site, screenshot, or result-count limit that requires a new daemon.
+Chrome memory and page complexity are the practical limits. Reuse matching tabs
+with `list_tabs()` and `switch_tab()`.
+
+One daemon has one mutable attached/current tab. Sequential switching, input,
+and screenshot capture are safe. Concurrent agents that switch tabs and act at
+the same time can race, causing one agent to act on or capture another agent's
+tab. For parallel interactive work, use separate remote browsers. Create a
+named local daemon only when parallel isolation is genuinely required, a remote
+browser cannot satisfy the task, and the extra Chrome approval prompt is
+acceptable.
+
+If the default daemon becomes stale, use its built-in reattachment/recovery
+first. A command timeout, truncated output, site change, closed tab, or new task
+is not a reason to create another daemon. Run `browser-harness --doctor` and
+restart or replace the default daemon only when it is actually dead or cannot
+recover.
 
 If the daemon cannot connect, run diagnostics:
 
@@ -77,6 +102,16 @@ browser-harness (for example Terminal, iTerm, or Codex) access in System
 Settings > Privacy & Security > Accessibility, then call `mac-approve` once
 again. This is only for local Chrome; do not call it for `BU_CDP_URL`,
 `BU_CDP_WS`, or Browser Use Cloud.
+
+When the shell tool can yield a still-running process, use a short 3-5 second
+initial yield for the first local command, not a 30-second wait. If the command
+yields with the Allow hint, leave that exact process running, immediately call
+`browser-harness mac-approve` in a second tool call, then resume or poll the
+original process. With a named daemon, preserve its exact `BU_NAME` for the
+helper. Never start the browser command again. If the user clicks Allow first,
+the same handshake completes and the original command returning successfully
+is the agent's feedback; `mac-approve` also returns `ready` when the daemon is
+already connected.
 
 ## Remote Browsers
 
