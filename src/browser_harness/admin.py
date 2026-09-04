@@ -188,6 +188,20 @@ def _pending_pid_record(path):
     return pid if _is_daemon_process(pid) else None
 
 
+def _fingerprinted_pending_pid(path):
+    """Return a pending PID only when its published start fingerprint matches."""
+    try:
+        record = json.loads(path.read_text())
+        pid = record["pid"]
+        fingerprint = record.get("started")
+    except (FileNotFoundError, OSError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    if type(pid) is not int or not 0 < pid < (1 << 31) or fingerprint is None:
+        return None
+    current = _process_start_time(pid)
+    return pid if current is not None and current == fingerprint else None
+
+
 def _pid_number(path):
     """Read only the PID field, without treating it as a trusted identity."""
     try:
@@ -735,15 +749,17 @@ def restart_daemon(name=None, require_clean=False):
     With require_clean=True, an unavailable daemon or any response other than
     {"ok": true} raises before endpoint cleanup or process termination.
 
-    Identity is verified via ipc.identify() before any process signal, so
-    a stale pid file whose number has been reused by an unrelated process
-    is never SIGTERM'd. If the daemon is unreachable, we just clean up the
-    pid file and socket and return — never escalate to a kill-by-pid-file.
+    Ready-daemon identity is verified via ipc.identify() before any process
+    signal. A local daemon waiting on Chrome approval has no IPC socket yet;
+    `--reload` may stop that exact pending generation only when its atomically
+    published process-start fingerprint still matches. A stale or legacy PID
+    file is never trusted for signaling.
     """
     import signal
 
     name = name or NAME
-    pid_path = str(ipc.pid_path(name))
+    pending_path = ipc.pid_path(name)
+    pid_path = str(pending_path)
 
     # Two pieces of information are tracked separately:
     #   - daemon_pid: the daemon's self-reported PID, or None. Only daemons
@@ -757,6 +773,9 @@ def restart_daemon(name=None, require_clean=False):
     daemon_alive = daemon_pid is not None or ipc.ping(name, timeout=1.0)
     if require_clean and not daemon_alive:
         raise RuntimeError(f"daemon {name!r} is unavailable for required clean shutdown")
+    pending_pid = None
+    if not daemon_alive and (_log_tail(name) or "").startswith("handshake-wait"):
+        pending_pid = _fingerprinted_pending_pid(pending_path)
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
     # path tears down the socket and then waits on a slow remote `stop` PATCH),
@@ -817,6 +836,15 @@ def restart_daemon(name=None, require_clean=False):
                     os.kill(daemon_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError, SystemError, OverflowError):
                     pass
+
+    if pending_pid is not None and _fingerprinted_pending_pid(pending_path) == pending_pid:
+        # The pre-IPC daemon cannot receive meta:shutdown. The parent-published
+        # start fingerprint is its cancellation capability: re-check it at the
+        # signal boundary so a reused PID is never terminated.
+        try:
+            os.kill(pending_pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError, SystemError, OverflowError):
+            pass
 
     ipc.cleanup_endpoint(name)
     try:

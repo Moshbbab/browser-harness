@@ -1287,3 +1287,47 @@ def test_pending_pid_record_rejects_reused_pid(tmp_path, monkeypatch):
     pid_file.write_text(json.dumps({"pid": os.getpid(), "started": "old-start"}))
     monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "new-start")
     assert admin_mod._pending_pid_record(pid_file) is None
+
+
+def test_restart_daemon_stops_exact_fingerprinted_pending_approval(tmp_path, monkeypatch):
+    import signal
+
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 4321, "started": "same-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "same-start")
+    signals = []
+    monkeypatch.setattr(admin_mod.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    admin_mod.restart_daemon("pending")
+
+    assert signals == [(4321, signal.SIGTERM)]
+    assert not pid_file.exists()
+
+
+def test_restart_daemon_never_signals_reused_pending_pid(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 4321, "started": "old-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "new-start")
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("reused PID must not be signaled")),
+    )
+
+    admin_mod.restart_daemon("pending")
+
+    assert not pid_file.exists()
