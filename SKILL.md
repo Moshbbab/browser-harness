@@ -32,6 +32,9 @@ PY
   `current_tab()` and `list_tabs()` and use `switch_tab()` to reuse a matching
   tab. Do not leave duplicate tabs on the same URL or close tabs you did not
   create.
+- At task completion, close tabs created for the task that are no longer needed.
+  Keep a tab open if the user needs to see it, it is needed for a known follow-up,
+  or closing it could discard unsaved work or other important state.
 - `new_tab()` and `switch_tab()` attach and move the horse marker without
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background; call `activate_tab(target)` only when the user explicitly asks
