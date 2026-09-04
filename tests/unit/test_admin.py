@@ -1,4 +1,8 @@
+import json
+import os
 import signal
+import time
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -970,3 +974,412 @@ def test_run_update_of_installed_wheel_never_pulls_an_enclosing_repo(tmp_path, m
         f"run_update must not shell out to git for a wheel install; ran {commands}"
     )
     assert ["uv", "tool", "upgrade", "browser-harness"] in commands
+
+
+# --- Chrome's "Allow remote debugging?" popup: one pending startup per name --
+# Chrome 144+ raises the popup per CDP connection, and the connection that
+# raised it is what keeps it on screen. ensure_daemon used to kill that daemon
+# whenever the click did not land in time, which dropped the popup and made the
+# next call raise a new one. Users with several daemons saw it for ever.
+
+
+def _park_daemon(tmp_path, monkeypatch, pid, *, is_daemon=True):
+    """Simulate a daemon parked on the popup: pid file + fresh handshake log."""
+    from browser_harness import admin as admin_mod
+
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    log_file = tmp_path / "daemon.log"
+    log_file.write_text("handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(str(pid))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod, "_is_daemon_process", lambda p: is_daemon)
+
+
+def test_parked_daemon_is_detected_from_pid_file_and_log(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    assert admin_mod._parked_daemon_pid() == os.getpid()
+
+
+def test_parked_daemon_liveness_never_uses_os_kill(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    monkeypatch.setattr(admin_mod, "_pending_pid_record", lambda path: os.getpid())
+    monkeypatch.setattr(admin_mod.os, "kill", lambda *a: (_ for _ in ()).throw(AssertionError("os.kill is destructive on Windows")))
+    assert admin_mod._parked_daemon_pid() == os.getpid()
+
+
+def test_parked_daemon_ignored_when_the_process_is_gone(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, 2147480000, is_daemon=False)  # never a live daemon
+    assert admin_mod._parked_daemon_pid() is None
+
+
+def test_parked_daemon_ignored_without_the_handshake_breadcrumb(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "connecting to ws://...")
+    assert admin_mod._parked_daemon_pid() is None
+
+
+def test_ensure_daemon_waits_for_the_parked_daemon_instead_of_spawning(tmp_path, monkeypatch):
+    """The second invocation must join the popup already on screen."""
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+
+    spawned = []
+
+    def refuse_spawn(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("spawned a sibling daemon while one was parked")
+
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", refuse_spawn)
+
+    with pytest.raises(RuntimeError, match="popup is still open"):
+        admin_mod.ensure_daemon(wait=0.3)
+    assert spawned == []
+
+
+def test_ensure_daemon_returns_when_the_parked_daemon_finishes(tmp_path, monkeypatch):
+    """Clicking Allow completes the parked handshake; no new daemon needed."""
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    calls = {"n": 0}
+
+    def alive(name=None):
+        calls["n"] += 1
+        return calls["n"] > 2  # the user clicks Allow on the third poll
+
+    monkeypatch.setattr(admin_mod, "daemon_alive", alive)
+    admin_mod.ensure_daemon(wait=5.0)  # returns, does not raise
+
+
+def test_ensure_daemon_does_not_replace_pending_approval_that_exited(tmp_path, monkeypatch):
+    """A failed approval attempt must not create another Chrome prompt."""
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    log_file = tmp_path / "daemon.log"
+    pid_file.write_text(str(os.getpid()))
+    log_file.write_text("handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    monkeypatch.setattr(admin_mod.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+    pending = iter([os.getpid(), None])
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: next(pending, None))
+    monkeypatch.setattr(admin_mod, "_starting_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_pending_pid_record", lambda path: None)
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "start")
+
+    class Dead:
+        pid = 4321
+        def poll(self): return 1
+
+    spawned = []
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: spawned.append(a) or Dead())
+
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
+        admin_mod.ensure_daemon(wait=0.1)
+    assert spawned == []
+
+
+def test_dead_pending_cleanup_does_not_unlink_successor(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    log_file = tmp_path / "daemon.log"
+    pid_file.write_text("111")
+    log_file.write_text("handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+    pending = iter([111, None])
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: next(pending, None))
+    monkeypatch.setattr(admin_mod, "_starting_daemon_pid", lambda name=None: None)
+
+    def old_dies_as_successor_arrives(path):
+        pid_file.write_text("222")
+        return None
+
+    monkeypatch.setattr(admin_mod, "_pending_pid_record", old_dies_as_successor_arrives)
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop after cleanup")))
+
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
+        admin_mod.ensure_daemon(wait=0.1)
+    assert pid_file.read_text() == "222"
+
+
+def test_default_local_approval_has_no_deadline_without_affecting_remote():
+    from browser_harness import admin as admin_mod
+
+    assert admin_mod._daemon_wait_windows(None, local=True) == (60.0, None)
+    assert admin_mod._daemon_wait_windows(None, local=False) == (60.0, 60.0)
+    assert admin_mod._daemon_wait_windows(7, local=True) == (7.0, 7.0)
+
+
+def test_permission_blocked_exit_is_not_retried(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    log_file = tmp_path / "daemon.log"
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    monkeypatch.setattr(admin_mod.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_starting_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "permission-blocked: approval expired")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "start")
+    monkeypatch.setattr(
+        admin_mod,
+        "restart_daemon",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("approval must not restart")),
+    )
+
+    class Dead:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    spawned = []
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", lambda *a, **k: spawned.append(a) or Dead())
+
+    with pytest.raises(RuntimeError, match="did not retry or create another connection"):
+        admin_mod.ensure_daemon(wait=0.1)
+    assert len(spawned) == 1
+
+
+def test_cold_spawn_publishes_child_before_releasing_lock(tmp_path, monkeypatch):
+    """A second cold caller sees the first child before its log exists."""
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    log_file = tmp_path / "daemon.log"
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "log_path", lambda name: log_file)
+    monkeypatch.setattr(admin_mod.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin_mod, "_is_local_chrome_mode", lambda env: True)
+    monkeypatch.setattr(admin_mod, "daemon_alive", lambda name=None: False)
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: None)
+    monkeypatch.setattr(admin_mod, "_is_daemon_process", lambda pid: pid == 4321)
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "start-4321")
+
+    class Starting:
+        pid = 4321
+
+        def poll(self): return None
+
+    spawned = []
+
+    def spawn(*args, **kwargs):
+        spawned.append(args)
+        pid_file.write_text("4321")
+        return Starting()
+
+    monkeypatch.setattr(admin_mod.subprocess, "Popen", spawn)
+
+    with pytest.raises(RuntimeError, match="didn't come up"):
+        admin_mod.ensure_daemon(wait=0)
+    assert len(spawned) == 1
+    assert json.loads(pid_file.read_text()) == {"pid": 4321, "started": "start-4321"}
+    old = time.time() - 86400
+    os.utime(pid_file, (old, old))
+    with pytest.raises(RuntimeError, match="didn't come up"):
+        admin_mod.ensure_daemon(wait=0)
+    assert len(spawned) == 1
+
+
+def test_starting_daemon_survives_wall_clock_age_before_log(tmp_path, monkeypatch):
+    """Sleep can age the PID mtime before the child writes handshake-wait."""
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": os.getpid(), "started": "start"}))
+    old = time.time() - 86400
+    os.utime(pid_file, (old, old))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "start")
+    assert admin_mod._starting_daemon_pid() == os.getpid()
+
+
+def test_parked_daemon_ignored_when_the_pid_was_reused(tmp_path, monkeypatch):
+    """A recycled pid belonging to something else must not look parked."""
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid(), is_daemon=False)
+    assert admin_mod._parked_daemon_pid() is None
+
+
+def test_parked_daemon_survives_wall_clock_age_while_process_is_live(tmp_path, monkeypatch):
+    """A live pending approval has no age-based expiry, including across sleep."""
+    from browser_harness import admin as admin_mod
+
+    _park_daemon(tmp_path, monkeypatch, os.getpid())
+    stale = time.time() - 86400
+    os.utime(tmp_path / "daemon.log", (stale, stale))
+    assert admin_mod._parked_daemon_pid() == os.getpid()
+
+
+def test_spawn_lock_is_exclusive_then_released(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: tmp_path / "daemon.pid")
+    with admin_mod._spawn_lock(timeout=0.2) as first:
+        assert first.fd is not None
+        with admin_mod._spawn_lock(timeout=0.2) as second:
+            assert second.fd is None  # someone else holds it; proceed anyway
+    with admin_mod._spawn_lock(timeout=0.2) as third:
+        assert third.fd is not None  # released on exit
+
+
+def test_spawn_lock_does_not_expire_while_owner_is_alive(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: tmp_path / "daemon.pid")
+    with admin_mod._spawn_lock(timeout=0.1) as first:
+        old = time.time() - 86400
+        os.utime(first.path, (old, old))
+        with admin_mod._spawn_lock(timeout=0.1) as second:
+            assert second.fd is None
+
+
+def test_spawn_lock_owner_cannot_unlink_successor(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: tmp_path / "daemon.pid")
+    first = admin_mod._spawn_lock(timeout=0.1)
+    first.__enter__()
+    first.path.write_text(f"{os.getpid()} successor")
+    first.__exit__()
+    assert first.path.read_text() == f"{os.getpid()} successor"
+
+
+def test_process_identity_check_fails_closed_when_unavailable(monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(admin_mod.subprocess, "run", unavailable)
+    assert admin_mod._is_daemon_process(os.getpid()) is False
+
+
+def test_pending_pid_record_rejects_reused_pid(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": os.getpid(), "started": "old-start"}))
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "new-start")
+    assert admin_mod._pending_pid_record(pid_file) is None
+
+
+def test_restart_daemon_stops_exact_fingerprinted_pending_approval(tmp_path, monkeypatch):
+    import signal
+
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 4321, "started": "same-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "same-start")
+    signals = []
+    monkeypatch.setattr(admin_mod.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    admin_mod.restart_daemon("pending")
+
+    assert signals == [(4321, signal.SIGTERM)]
+    assert not pid_file.exists()
+
+
+def test_restart_daemon_never_signals_reused_pending_pid(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 4321, "started": "old-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "new-start")
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("reused PID must not be signaled")),
+    )
+
+    admin_mod.restart_daemon("pending")
+
+    assert not pid_file.exists()
+
+
+def test_restart_daemon_preserves_live_pending_without_fingerprint(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("4321")
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_is_daemon_process", lambda pid: pid == 4321)
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: None)
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("unverified PID must not be signaled")),
+    )
+
+    with pytest.raises(RuntimeError, match="ownership records were preserved"):
+        admin_mod.restart_daemon("pending")
+
+    assert pid_file.read_text() == "4321"
+
+
+def test_restart_daemon_does_not_cancel_successor_generation(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(json.dumps({"pid": 111, "started": "old-start"}))
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod.ipc, "cleanup_endpoint", lambda name: None)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_parked_daemon_pid", lambda name=None: 111)
+    generations = iter([(111, "old-start"), (222, "new-start")])
+    monkeypatch.setattr(
+        admin_mod,
+        "_fingerprinted_pending_generation",
+        lambda path: next(generations),
+    )
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("successor must not be signaled")),
+    )
+
+    with pytest.raises(RuntimeError, match="changed ownership; the successor was not signaled"):
+        admin_mod.restart_daemon("pending")
+
+    assert pid_file.exists()
