@@ -775,7 +775,13 @@ def restart_daemon(name=None, require_clean=False):
         raise RuntimeError(f"daemon {name!r} is unavailable for required clean shutdown")
     pending_pid = None
     if not daemon_alive and (_log_tail(name) or "").startswith("handshake-wait"):
+        parked_pid = _parked_daemon_pid(name)
         pending_pid = _fingerprinted_pending_pid(pending_path)
+        if parked_pid is not None and pending_pid is None:
+            raise RuntimeError(
+                f"pending daemon {name!r} is live but has no verifiable process fingerprint; "
+                "it was not signaled and its ownership records were preserved"
+            )
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
     # path tears down the socket and then waits on a slow remote `stop` PATCH),

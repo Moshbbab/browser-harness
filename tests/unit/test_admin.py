@@ -1331,3 +1331,26 @@ def test_restart_daemon_never_signals_reused_pending_pid(tmp_path, monkeypatch):
     admin_mod.restart_daemon("pending")
 
     assert not pid_file.exists()
+
+
+def test_restart_daemon_preserves_live_pending_without_fingerprint(tmp_path, monkeypatch):
+    from browser_harness import admin as admin_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("4321")
+    monkeypatch.setattr(admin_mod.ipc, "pid_path", lambda name: pid_file)
+    monkeypatch.setattr(admin_mod.ipc, "identify", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod.ipc, "ping", lambda *a, **k: False)
+    monkeypatch.setattr(admin_mod, "_log_tail", lambda name=None: "handshake-wait: click Allow")
+    monkeypatch.setattr(admin_mod, "_is_daemon_process", lambda pid: pid == 4321)
+    monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: None)
+    monkeypatch.setattr(
+        admin_mod.os,
+        "kill",
+        lambda *a: (_ for _ in ()).throw(AssertionError("unverified PID must not be signaled")),
+    )
+
+    with pytest.raises(RuntimeError, match="ownership records were preserved"):
+        admin_mod.restart_daemon("pending")
+
+    assert pid_file.read_text() == "4321"
