@@ -1123,24 +1123,10 @@ def test_dead_pending_cleanup_does_not_unlink_successor(tmp_path, monkeypatch):
     assert pid_file.read_text() == "222"
 
 
-def test_allow_timeout_is_patient_and_configurable(monkeypatch):
-    from browser_harness import daemon as daemon_mod
-
-    monkeypatch.delenv("BH_ALLOW_TIMEOUT", raising=False)
-    assert daemon_mod._allow_timeout() == 3600
-    monkeypatch.setenv("BH_ALLOW_TIMEOUT", "30")
-    assert daemon_mod._allow_timeout() == 30
-    for bad in ("", "nonsense", "0", "-5", "inf", "-inf", "nan"):
-        monkeypatch.setenv("BH_ALLOW_TIMEOUT", bad)
-        assert daemon_mod._allow_timeout() == 3600
-
-
-def test_default_local_wait_matches_allow_window_without_affecting_remote(monkeypatch):
+def test_default_local_approval_has_no_deadline_without_affecting_remote():
     from browser_harness import admin as admin_mod
-    from browser_harness import daemon as daemon_mod
 
-    monkeypatch.setattr(daemon_mod, "LOCAL_HANDSHAKE_TIMEOUT", 3600)
-    assert admin_mod._daemon_wait_windows(None, local=True) == (60.0, 3600.0)
+    assert admin_mod._daemon_wait_windows(None, local=True) == (60.0, None)
     assert admin_mod._daemon_wait_windows(None, local=False) == (60.0, 60.0)
     assert admin_mod._daemon_wait_windows(7, local=True) == (7.0, 7.0)
 
@@ -1241,11 +1227,11 @@ def test_parked_daemon_ignored_when_the_pid_was_reused(tmp_path, monkeypatch):
 
 
 def test_parked_daemon_survives_wall_clock_age_while_process_is_live(tmp_path, monkeypatch):
-    """Laptop sleep advances wall time but not the handshake's monotonic timer."""
+    """A live pending approval has no age-based expiry, including across sleep."""
     from browser_harness import admin as admin_mod
 
     _park_daemon(tmp_path, monkeypatch, os.getpid())
-    stale = time.time() - (admin_mod._parked_log_grace() + 60)
+    stale = time.time() - 86400
     os.utime(tmp_path / "daemon.log", (stale, stale))
     assert admin_mod._parked_daemon_pid() == os.getpid()
 
@@ -1301,16 +1287,3 @@ def test_pending_pid_record_rejects_reused_pid(tmp_path, monkeypatch):
     pid_file.write_text(json.dumps({"pid": os.getpid(), "started": "old-start"}))
     monkeypatch.setattr(admin_mod, "_process_start_time", lambda pid: "new-start")
     assert admin_mod._pending_pid_record(pid_file) is None
-
-
-def test_parked_grace_tracks_the_daemon_handshake_timeout(monkeypatch):
-    """A daemon may hold the popup for the whole handshake window, so the
-    breadcrumb must stay believable at least that long — including when
-    BH_ALLOW_TIMEOUT shortens that window."""
-    from browser_harness import admin as admin_mod
-    from browser_harness import daemon as daemon_mod
-
-    assert admin_mod._parked_log_grace() > daemon_mod.LOCAL_HANDSHAKE_TIMEOUT
-
-    monkeypatch.setattr(daemon_mod, "LOCAL_HANDSHAKE_TIMEOUT", 30)
-    assert admin_mod._parked_log_grace() > 30

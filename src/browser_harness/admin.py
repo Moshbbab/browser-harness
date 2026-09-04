@@ -140,22 +140,6 @@ def _log_tail(name):
         return None
 
 
-def _parked_log_grace():
-    """How long a `handshake-wait` breadcrumb stays believable.
-
-    It has to track the daemon's own patience: the popup can legitimately sit
-    there for LOCAL_HANDSHAKE_TIMEOUT, so a shorter window would stop
-    recognising a genuinely parked daemon and spawn a second one, which is the
-    exact bug this file removes.
-    """
-    try:
-        from .daemon import LOCAL_HANDSHAKE_TIMEOUT
-
-        return float(LOCAL_HANDSHAKE_TIMEOUT) + 60
-    except Exception:
-        return 3660.0
-
-
 def _is_daemon_process(pid):
     """Best effort: does `pid` look like one of our daemons?
 
@@ -358,14 +342,7 @@ def _daemon_wait_windows(wait, local):
     """Return normal startup and Chrome-approval wait windows in seconds."""
     explicit_wait = wait is not None
     startup_wait = float(wait) if explicit_wait else 60.0
-    approval_wait = startup_wait
-    if local and not explicit_wait:
-        try:
-            from .daemon import LOCAL_HANDSHAKE_TIMEOUT
-
-            approval_wait = float(LOCAL_HANDSHAKE_TIMEOUT)
-        except Exception:
-            approval_wait = 3600.0
+    approval_wait = None if local and not explicit_wait else startup_wait
     return startup_wait, approval_wait
 
 
@@ -558,7 +535,7 @@ def ensure_daemon(wait=None, name=None, env=None):
     local = _is_local_chrome_mode(env)
     startup_wait, approval_wait = _daemon_wait_windows(wait, local)
     # Remote/CDP daemons retain the normal 60s startup bound. Only a local
-    # Chrome handshake displaying the per-connection approval sheet extends a
+    # Chrome handshake displaying the per-connection approval sheet removes a
     # default caller's deadline, so Browser Use cloud startup is unaffected.
     launched_browser = None
     opened_inspect = False
@@ -598,7 +575,7 @@ def ensure_daemon(wait=None, name=None, env=None):
         hinted = not local
         approval_waiting = False
         pending_died = False
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             if daemon_alive(name):
                 _cleanup_unattached_browser_launch(launched_browser)
                 return
@@ -611,7 +588,7 @@ def ensure_daemon(wait=None, name=None, env=None):
             log_tail = _log_tail(name) or ""
             if local and not approval_waiting and log_tail.startswith("handshake-wait"):
                 approval_waiting = True
-                deadline = max(deadline, spawned + approval_wait)
+                deadline = None if approval_wait is None else max(deadline, spawned + approval_wait)
             if not hinted and time.monotonic() - spawned > 2 and log_tail.startswith("handshake-wait"):
                 daemon_name = name or NAME
                 approve_command = (

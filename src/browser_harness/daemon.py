@@ -1,5 +1,5 @@
 """CDP WS holder + IPC relay (Unix socket on POSIX, TCP loopback on Windows). One daemon per BU_NAME."""
-import asyncio, json, math, os, platform, socket, sys, time, urllib.error, urllib.request
+import asyncio, json, os, platform, socket, sys, time, urllib.error, urllib.request
 from urllib.parse import urlparse
 from collections import deque
 from pathlib import Path
@@ -116,23 +116,11 @@ REMOTE_ID = os.environ.get("BU_BROWSER_ID")
 _REMOTE_STOPPED = False
 BROWSER_KIND = "cloud" if REMOTE_ID else ("cdp" if (os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL")) else "local")
 # Chrome 144+ shows a per-connection popup, and the connection that raised it is
-# the only thing keeping it on screen. 45s expired while the user was in another
-# app, which dropped the popup and made the next call raise a fresh one. One
-# hour gives the user or an accessibility helper time to approve without
-# imposing an infinite stuck process; BH_ALLOW_TIMEOUT lets unattended runs
-# fail sooner or interactive runs wait longer.
-def _allow_timeout(default=3600.0):
-    raw = os.environ.get("BH_ALLOW_TIMEOUT")
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value > 0 else default
-
-
-LOCAL_HANDSHAKE_TIMEOUT = _allow_timeout()
+# the only thing keeping it on screen. There is deliberately no approval
+# deadline: expiry would drop the sheet and make a later attempt create another
+# connection and another prompt. Chrome/process death and explicit cancellation
+# still terminate the pending connection.
+LOCAL_HANDSHAKE_TIMEOUT = None
 # How long get_ws_url() keeps waiting for DevToolsActivePort before giving up
 NO_TOGGLE_GRACE = 3
 TOGGLE_BOOT_GRACE = 12
@@ -420,7 +408,7 @@ def is_reusable_new_tab_page(t):
 
 
 class _PatientCDPClient(CDPClient):
-    """CDPClient with the WS opening handshake stretched to LOCAL_HANDSHAKE_TIMEOUT."""
+    """CDPClient whose local Chrome approval handshake has no deadline."""
 
     async def start(self):
         import websockets
@@ -663,8 +651,8 @@ class Daemon:
                 )
             if BROWSER_KIND == "local" and ("timed out" in str(e).lower() or "403" in str(e)) and remote_debugging_user_enabled():
                 raise RuntimeError(
-                    f"permission-blocked: Chrome's 'Allow remote debugging?' popup was not accepted within {LOCAL_HANDSHAKE_TIMEOUT}s"
-                    " -- wait for the user to click Allow, then retry"
+                    "permission-blocked: Chrome did not approve the remote debugging connection; "
+                    "browser-harness did not retry or create another connection"
                 )
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
