@@ -74,6 +74,31 @@ _WINDOWS_PROFILES = (  # relative to %LOCALAPPDATA%; SxS = Canary channel
 )
 
 
+def _publish_own_pid(path=PID, pid=None):
+    """Atomically retain or publish this daemon's PID record.
+
+    The parent may already have published a process-start fingerprint while
+    holding the spawn lock. Never truncate that record: another cold caller
+    must not observe an empty PID file and start a sibling daemon.
+    """
+    pid = pid or os.getpid()
+    target = Path(path)
+    try:
+        published = target.read_text()
+        try:
+            published_pid = int(json.loads(published)["pid"])
+        except (json.JSONDecodeError, TypeError, KeyError):
+            published_pid = int(published.split()[0])
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        published = str(pid)
+        published_pid = pid
+    if published_pid != pid:
+        published = str(pid)
+    tmp = target.with_name(f"{target.name}.{pid}.tmp")
+    tmp.write_text(published)
+    os.replace(tmp, target)
+
+
 def profile_dirs(system=None):
     system = system or platform.system()
     if system == "Windows":
@@ -90,8 +115,12 @@ BU_API = "https://api.browser-use.com/api/v3"
 REMOTE_ID = os.environ.get("BU_BROWSER_ID")
 _REMOTE_STOPPED = False
 BROWSER_KIND = "cloud" if REMOTE_ID else ("cdp" if (os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL")) else "local")
-# Chrome 144+ shows a per-connection popup. Keep popup open enough to click.
-LOCAL_HANDSHAKE_TIMEOUT = 45
+# Chrome 144+ shows a per-connection popup, and the connection that raised it is
+# the only thing keeping it on screen. There is deliberately no approval
+# deadline: expiry would drop the sheet and make a later attempt create another
+# connection and another prompt. Chrome/process death and explicit cancellation
+# still terminate the pending connection.
+LOCAL_HANDSHAKE_TIMEOUT = None
 # How long get_ws_url() keeps waiting for DevToolsActivePort before giving up
 NO_TOGGLE_GRACE = 3
 TOGGLE_BOOT_GRACE = 12
@@ -379,7 +408,7 @@ def is_reusable_new_tab_page(t):
 
 
 class _PatientCDPClient(CDPClient):
-    """CDPClient with the WS opening handshake stretched to LOCAL_HANDSHAKE_TIMEOUT."""
+    """CDPClient whose local Chrome approval handshake has no deadline."""
 
     async def start(self):
         import websockets
@@ -622,8 +651,8 @@ class Daemon:
                 )
             if BROWSER_KIND == "local" and ("timed out" in str(e).lower() or "403" in str(e)) and remote_debugging_user_enabled():
                 raise RuntimeError(
-                    f"permission-blocked: Chrome's 'Allow remote debugging?' popup was not accepted within {LOCAL_HANDSHAKE_TIMEOUT}s"
-                    " -- wait for the user to click Allow, then retry"
+                    "permission-blocked: Chrome did not approve the remote debugging connection; "
+                    "browser-harness did not retry or create another connection"
                 )
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
@@ -851,7 +880,7 @@ if __name__ == "__main__":
         print(f"daemon already running on {SOCK}", file=sys.stderr)
         sys.exit(0)
     open(LOG, "w").close()
-    open(PID, "w").write(str(os.getpid()))
+    _publish_own_pid()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

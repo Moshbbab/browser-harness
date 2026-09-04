@@ -1,8 +1,27 @@
 import asyncio
+import os
 
 import pytest
 
 from browser_harness import daemon
+
+
+def test_publish_own_pid_never_truncates_parent_record(tmp_path, monkeypatch):
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text('{"pid":4321,"started":"process start with spaces"}')
+    real_replace = os.replace
+    observed = []
+
+    def replace(src, dst):
+        observed.append(pid_file.read_text())
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    daemon._publish_own_pid(pid_file, pid=4321)
+
+    expected = '{"pid":4321,"started":"process start with spaces"}'
+    assert observed == [expected]
+    assert pid_file.read_text() == expected
 
 
 @pytest.mark.parametrize(

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "browser-harness"
-version = "0.1.11"
+version = "0.1.13"
 description = "The simplest, thinnest, and most powerful harness to control your real browser with your agent."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=2.0.0,<3"]
+mcp = ["mcp==2.1.1"]
 
 [project.scripts]
 browser-harness = "browser_harness.run:main"
