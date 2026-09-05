@@ -37,8 +37,9 @@ PY
   or closing it could discard unsaved work or other important state.
 - `new_tab()` and `switch_tab()` attach and move the horse marker without
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
-  background; call `activate_tab(target)` only when the user explicitly asks
-  or a page demonstrably pauses rendering while hidden.
+  background. Never call `activate_tab(target)` automatically: it brings Chrome
+  to the foreground. Call it only when the user explicitly asks to see or
+  visibly switch to that tab. Do not pair `switch_tab()` with `activate_tab()`.
 - A local daemon is a connection to the whole Chrome instance, not to one site,
   task, card, or agent. Omit `BU_NAME` and reuse the default daemon for normal
   sequential local work across websites, tabs, screenshots, and Codex turns.
@@ -47,11 +48,13 @@ PY
   another Allow prompt.
 - Set `BH_TAB_MARKER=0` before starting the daemon to leave page titles unchanged.
   The horse marker remains enabled by default.
-- A timed-out `scroll(...)` on an attached background tab is evidence that the
-  page needs to be visible. Call `activate_tab(current_tab())`, retry the same
-  scroll once, then re-read the scroll position. This visibly switches tabs,
-  so do not use it when the user has forbidden foreground changes. Do not
-  invent a `Runtime.evaluate` scroll replacement or a cross-frame JS walker.
+- A timeout or page that pauses while hidden is not permission to foreground
+  Chrome. Keep using background CDP operations. For a focus-gated page,
+  temporarily call `cdp("Emulation.setFocusEmulationEnabled", enabled=True)`,
+  perform and verify the operation, then disable it in a `finally` block. If
+  background control still cannot work, report that limitation instead of
+  activating the tab. Do not invent a `Runtime.evaluate` scroll replacement or
+  a cross-frame JS walker.
 - The normal local flow attaches to the running Chrome/Chromium CDP endpoint. No browser ids or local profile selection.
 
 ## Local Chrome
